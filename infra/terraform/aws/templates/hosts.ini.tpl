@@ -1,0 +1,5 @@
+[dify_servers]
+${ec2_public_ip} ansible_user=${ssh_user} ansible_ssh_private_key_file=${ssh_key_path}
+
+[dify_servers:vars]
+ansible_python_interpreter=/usr/bin/python3

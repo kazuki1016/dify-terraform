@@ -1,0 +1,152 @@
+name: Dify環境自動構築 (AWS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: "環境名 (dev/staging/prod)"
+        required: true
+        default: "dev"
+      vpc_cidr:
+        description: "VPC CIDR ブロック"
+        required: false
+        default: "10.0.0.0/16"
+      aws_region:
+        description: "AWSリージョン"
+        required: false
+        default: "ap-northeast-1"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      TF_WORKING_DIR: ./infra/terraform/aws
+      ANSIBLE_WORKING_DIR: ./infra/ansible/aws
+      AWS_REGION: ${{ github.event.inputs.aws_region || 'ap-northeast-1' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="environment=${{ github.event.inputs.environment_name }}" \
+            -var="vpc_cidr=${{ github.event.inputs.vpc_cidr }}" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -out=tfplan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Apply
+        id: tf-apply
+        run: terraform apply -auto-approve tfplan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Get Terraform Outputs
+        id: tf-outputs
+        run: |
+          EC2_PUBLIC_IP=$(terraform output -raw ec2_public_ip)
+          SECURITY_GROUP_ID=$(terraform output -raw security_group_id)
+          echo "ec2_ip=${EC2_PUBLIC_IP}" >> $GITHUB_OUTPUT
+          echo "sg_id=${SECURITY_GROUP_ID}" >> $GITHUB_OUTPUT
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Get GitHub Actions Runner IP
+        id: get_ip
+        run: |
+          IP=$(curl -s https://checkip.amazonaws.com/)
+          echo "runner_ip=${IP}" >> $GITHUB_OUTPUT
+
+      - name: Add GitHub Actions Runner IP to Security Group
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ steps.tf-outputs.outputs.sg_id }} \
+            --protocol tcp \
+            --port 22 \
+            --cidr ${{ steps.get_ip.outputs.runner_ip }}/32 \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for EC2 Instance to be Ready
+        run: |
+          aws ec2 wait instance-status-ok \
+            --filters "Name=ip-address,Values=${{ steps.tf-outputs.outputs.ec2_ip }}" \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Setup Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-pip
+          pip3 install ansible-core boto3 botocore
+          ansible-galaxy collection install 'community.docker:<4.0.0'
+          ansible-galaxy collection install amazon.aws
+
+      - name: Retrieve SSH Key from AWS Secrets Manager
+        id: get_ssh_key
+        run: |
+          aws secretsmanager get-secret-value \
+            --secret-id dify-ssh-private-key-${{ github.event.inputs.environment_name }} \
+            --region ${{ env.AWS_REGION }} \
+            --query SecretString \
+            --output text > /tmp/ssh_key.pem
+          chmod 600 /tmp/ssh_key.pem
+
+      - name: Create Ansible Inventory
+        run: |
+          cat > hosts.ini << EOF
+          [dify_servers]
+          ${{ steps.tf-outputs.outputs.ec2_ip }} ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/ssh_key.pem
+
+          [dify_servers:vars]
+          ansible_python_interpreter=/usr/bin/python3
+          EOF
+        working-directory: ${{ env.ANSIBLE_WORKING_DIR }}
+
+      - name: Run Ansible Playbook
+        run: |
+          ansible-playbook -i hosts.ini playbook.yml \
+            --ssh-common-args='-o StrictHostKeyChecking=no'
+        working-directory: ${{ env.ANSIBLE_WORKING_DIR }}
+
+      - name: Output Deployment Information
+        run: |
+          echo "### Deployment Successful! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ github.event.inputs.environment_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**EC2 Public IP:** ${{ steps.tf-outputs.outputs.ec2_ip }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Access Dify at: http://${{ steps.tf-outputs.outputs.ec2_ip }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Remove GitHub Actions Runner IP from Security Group
+        if: always()
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ steps.tf-outputs.outputs.sg_id }} \
+            --protocol tcp \
+            --port 22 \
+            --cidr ${{ steps.get_ip.outputs.runner_ip }}/32 \
+            --region ${{ env.AWS_REGION }} || true
+
+      - name: Cleanup SSH Key
+        if: always()
+        run: |
+          rm -f /tmp/ssh_key.pem

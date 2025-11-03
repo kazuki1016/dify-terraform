@@ -1,0 +1,221 @@
+---
+- name: Install Docker and Setup Dify with Compose V2
+  hosts: dify_servers
+  become: yes
+  vars:
+    dify_install_dir: /opt/dify
+    docker_data_dir: /data/docker
+
+  tasks:
+    - name: Update and upgrade apt packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - git
+          - python3-pip
+        state: present
+
+    - name: Create directory for Docker GPG key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.shell:
+        cmd: curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Set permissions on Docker GPG key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/docker.gpg
+        mode: "0644"
+
+    - name: Set up Docker repository
+      ansible.builtin.shell:
+        cmd: >
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Update apt package index again
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Docker Engine and Compose Plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Create Docker data directory
+      ansible.builtin.file:
+        path: "{{ docker_data_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Configure Docker to use data directory
+      ansible.builtin.copy:
+        content: |
+          {
+            "data-root": "{{ docker_data_dir }}",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            }
+          }
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+      notify: Restart Docker
+
+    - name: Add ubuntu user to docker group
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: Enable and start Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Reset SSH connection to apply group membership
+      ansible.builtin.meta: reset_connection
+
+    - name: Create directory for Dify
+      ansible.builtin.file:
+        path: "{{ dify_install_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Clone Dify repository
+      ansible.builtin.git:
+        repo: https://github.com/langgenius/dify.git
+        dest: "{{ dify_install_dir }}"
+        version: main
+        force: yes
+      become_user: ubuntu
+
+    - name: Copy sample environment file
+      ansible.builtin.copy:
+        src: "{{ dify_install_dir }}/docker/.env.example"
+        dest: "{{ dify_install_dir }}/docker/.env"
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+      become_user: ubuntu
+
+    # マネージドデータベース/キャッシュを使用しないため、
+    # Dify Docker Compose内のPostgreSQLとRedisをそのまま使用
+    # RDSとRedisの設定読み込みをスキップ
+
+    - name: Read S3 bucket from environment
+      ansible.builtin.shell:
+        cmd: grep "S3_BUCKET" /etc/environment | cut -d'=' -f2
+      register: s3_bucket
+      changed_when: false
+
+    - name: Read AWS region from environment
+      ansible.builtin.shell:
+        cmd: grep "AWS_REGION" /etc/environment | cut -d'=' -f2
+      register: aws_region
+      changed_when: false
+
+    # Docker Compose内のPostgreSQLとRedisを使用するため、
+    # データベースとキャッシュの設定はデフォルトのまま（コメントアウト）
+
+    # - name: Configure Dify environment - Database
+    #   ansible.builtin.lineinfile:
+    #     path: "{{ dify_install_dir }}/docker/.env"
+    #     regexp: "{{ item.regexp }}"
+    #     line: "{{ item.line }}"
+    #   loop:
+    #     - regexp: "^DB_HOST="
+    #       line: "DB_HOST={{ rds_endpoint.stdout.split(':')[0] }}"
+    #     - regexp: "^DB_PORT="
+    #       line: "DB_PORT=5432"
+    #     - regexp: "^DB_USERNAME="
+    #       line: "DB_USERNAME={{ rds_username.stdout }}"
+    #     - regexp: "^DB_PASSWORD="
+    #       line: "DB_PASSWORD={{ rds_password.stdout }}"
+    #     - regexp: "^DB_DATABASE="
+    #       line: "DB_DATABASE={{ rds_database.stdout }}"
+    #   become_user: ubuntu
+    #   no_log: true
+
+    # - name: Configure Dify environment - Redis
+    #   ansible.builtin.lineinfile:
+    #     path: "{{ dify_install_dir }}/docker/.env"
+    #     regexp: "{{ item.regexp }}"
+    #     line: "{{ item.line }}"
+    #   loop:
+    #     - regexp: "^REDIS_HOST="
+    #       line: "REDIS_HOST={{ redis_endpoint.stdout }}"
+    #     - regexp: "^REDIS_PORT="
+    #       line: "REDIS_PORT={{ redis_port.stdout }}"
+    #   become_user: ubuntu
+
+    - name: Configure Dify environment - S3 Storage
+      ansible.builtin.lineinfile:
+        path: "{{ dify_install_dir }}/docker/.env"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - regexp: "^STORAGE_TYPE="
+          line: "STORAGE_TYPE=s3"
+        - regexp: "^S3_BUCKET_NAME="
+          line: "S3_BUCKET_NAME={{ s3_bucket.stdout }}"
+        - regexp: "^S3_REGION="
+          line: "S3_REGION={{ aws_region.stdout }}"
+      become_user: ubuntu
+
+    - name: Pull Docker images
+      community.docker.docker_compose_v2:
+        project_src: "{{ dify_install_dir }}/docker"
+        state: present
+        pull: always
+      become_user: ubuntu
+
+    - name: Start Dify containers
+      community.docker.docker_compose_v2:
+        project_src: "{{ dify_install_dir }}/docker"
+        state: present
+      become_user: ubuntu
+
+    - name: Wait for Dify to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:80"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 30
+      delay: 10
+
+    - name: Display Dify access information
+      ansible.builtin.debug:
+        msg:
+          - "Dify has been successfully deployed!"
+          - "Access URL: http://{{ ansible_host }}"
+          - "Please complete the initial setup through the web interface."
+
+  handlers:
+    - name: Restart Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted

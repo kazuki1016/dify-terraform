@@ -1,0 +1,108 @@
+name: Dify環境自動構築
+
+on:
+  workflow_dispatch:
+    inputs:
+      manage_resource_group_name:
+        description: "シークレットを管理するリソースグループ名"
+        required: true
+      individual_resource_group_name:
+        description: "環境を設置する対象のリソースグループ名"
+        required: true
+      vault_name:
+        description: "Azure Key Vaultのリソース名"
+        required: true
+      nsg_name:
+        description: "NSG名"
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      TF_WORKING_DIR: ./infra/terraform/azure
+      ANSIBLE_WORKING_DIR: ./infra/ansible/azure
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Apply
+        id: tf-apply
+        run: |
+          terraform apply -auto-approve \
+            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -var="client_secret=${{ secrets.AZURE_CLIENT_SECRET }}"
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Add IP Address For Key Vault And NSG
+        uses: azure/CLI@v1
+        id: get_ip
+        with:
+          inlineScript: |
+            IP=$(curl -s https://checkip.amazonaws.com/)
+            echo "IP=$IP" >> $GITHUB_OUTPUT
+            az keyvault network-rule add \
+              --resource-group "${{ github.event.inputs.manage_resource_group_name }}" \
+              --name "${{ github.event.inputs.vault_name }}" \
+              --ip-address "${IP}/32"
+
+            az network nsg rule create \
+              --resource-group "${{ github.event.inputs.individual_resource_group_name }}" \
+              --nsg-name "${{ github.event.inputs.nsg_name }}" \
+              --name SSH-Temp \
+              --priority 1000 \
+              --source-address-prefixes "${IP}" \
+              --destination-port-ranges 22 \
+              --access Allow \
+              --protocol Tcp \
+              --direction Inbound
+
+      - name: Setup Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible python3-pip
+          pip3 install ansible-core
+          ansible-galaxy collection install 'community.docker:<4.0.0'
+
+      - name: Run Ansible Playbook
+        run: |
+          ansible-playbook -i hosts.ini playbook.yml \
+            --ssh-common-args='-o StrictHostKeyChecking=no'
+        working-directory: ${{ env.ANSIBLE_WORKING_DIR }}
+
+      - name: Remove GitHub Actions Runner IP from NSG
+        if: always()
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            IP="${{ steps.get_ip.outputs.IP }}"
+            az keyvault network-rule remove \
+              --resource-group "${{ github.event.inputs.manage_resource_group_name }}" \
+              --name "${{ github.event.inputs.vault_name }}" \
+              --ip-address "${IP}/32"
+
+            az network nsg rule delete \
+              --resource-group "${{ github.event.inputs.individual_resource_group_name }}" \
+              --nsg-name "${{ github.event.inputs.nsg_name }}" \
+              --name SSH-Temp
