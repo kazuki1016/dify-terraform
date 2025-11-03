@@ -7,14 +7,6 @@ on:
         description: "環境名 (dev/staging/prod)"
         required: true
         default: "dev"
-      vpc_cidr:
-        description: "VPC CIDR ブロック"
-        required: false
-        default: "10.0.0.0/16"
-      aws_region:
-        description: "AWSリージョン"
-        required: false
-        default: "ap-northeast-1"
 
 permissions:
   id-token: write
@@ -51,7 +43,6 @@ jobs:
         run: |
           terraform plan \
             -var="environment=${{ github.event.inputs.environment_name }}" \
-            -var="vpc_cidr=${{ github.event.inputs.vpc_cidr }}" \
             -var="aws_region=${{ env.AWS_REGION }}" \
             -out=tfplan
         working-directory: ${{ env.TF_WORKING_DIR }}
