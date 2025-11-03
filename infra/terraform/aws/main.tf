@@ -23,7 +23,7 @@ terraform {
 
   # S3バックエンドの設定
   backend "s3" {
-    bucket         = "dify-terraform-state"
+    bucket         = "dify-terraform-state-kazu1016"
     key            = "dify/terraform.tfstate"
     region         = "ap-northeast-1"
     encrypt        = true
