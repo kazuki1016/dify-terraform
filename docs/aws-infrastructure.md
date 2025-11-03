@@ -209,6 +209,62 @@ sequenceDiagram
     GHA->>User: Deployment Complete
 ```
 
+## 事前準備
+
+### 1. Terraformバックエンド用のS3バケット・DynamoDBテーブル作成
+
+Terraformのステートファイルをチームで共有し、同時実行を防ぐために、S3バケットとDynamoDBテーブルを事前に作成する必要があります。
+
+#### S3バケットの作成（Terraformステート保存用）
+
+```bash
+# S3バケットの作成
+aws s3api create-bucket \
+  --bucket dify-terraform-state \
+  --region ap-northeast-1 \
+  --create-bucket-configuration LocationConstraint=ap-northeast-1
+
+# バージョニングを有効化（誤削除防止）
+aws s3api put-bucket-versioning \
+  --bucket dify-terraform-state \
+  --versioning-configuration Status=Enabled
+
+# 暗号化を有効化
+aws s3api put-bucket-encryption \
+  --bucket dify-terraform-state \
+  --server-side-encryption-configuration '{
+    "Rules": [{
+      "ApplyServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "AES256"
+      }
+    }]
+  }'
+
+# パブリックアクセスのブロック
+aws s3api put-public-access-block \
+  --bucket dify-terraform-state \
+  --public-access-block-configuration \
+    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+```
+
+#### 確認コマンド
+
+```bash
+# S3バケットの確認
+aws s3 ls | grep dify-terraform-state
+
+# DynamoDBテーブルの確認
+aws dynamodb describe-table --table-name dify-terraform-locks --region ap-northeast-1
+```
+
+**注意**: これらのリソースは、Terraformを実行する前に一度だけ手動で作成してください。
+
+### 2. IAM OIDC Provider とロールの作成
+
+GitHub ActionsからAWSにアクセスするためのOIDCプロバイダーとIAMロールを作成します。
+
+詳細は[GitHub Actions OIDC設定ガイド](https://docs.github.com/ja/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)を参照してください。
+
 ## 環境変数・パラメータ
 
 ### GitHub Secrets (必須設定)

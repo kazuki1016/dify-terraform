@@ -21,13 +21,13 @@ terraform {
     }
   }
 
-  # S3バックエンドの設定 (オプション)
+  # S3バックエンドの設定
   backend "s3" {
     bucket         = "dify-terraform-state"
     key            = "dify/terraform.tfstate"
     region         = "ap-northeast-1"
     encrypt        = true
-    dynamodb_table = "dify-terraform-locks"
+    use_lockfile   = true
   }
 }
 
