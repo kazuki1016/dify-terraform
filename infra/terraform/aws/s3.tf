@@ -55,6 +55,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "dify" {
     id     = "archive-old-versions"
     status = "Enabled"
 
+    filter {} # すべてのオブジェクトに適用
+
     noncurrent_version_transition {
       noncurrent_days = 30
       storage_class   = "STANDARD_IA"
@@ -73,6 +75,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "dify" {
   rule {
     id     = "delete-incomplete-uploads"
     status = "Enabled"
+
+    filter {} # すべてのオブジェクトに適用
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7

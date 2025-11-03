@@ -25,12 +25,12 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
         "collect_list": [
           {
             "file_path": "/var/log/user-data.log",
-            "log_group_name": "/aws/ec2/dify-${var.environment}",
+            "log_group_name": "/aws/ec2/dify-${environment}",
             "log_stream_name": "{instance_id}/user-data.log"
           },
           {
             "file_path": "/var/log/syslog",
-            "log_group_name": "/aws/ec2/dify-${var.environment}",
+            "log_group_name": "/aws/ec2/dify-${environment}",
             "log_stream_name": "{instance_id}/syslog"
           }
         ]

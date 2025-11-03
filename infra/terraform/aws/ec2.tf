@@ -143,8 +143,9 @@ resource "aws_instance" "dify" {
   # マネージドサービス(RDS/ElastiCache)を使用しない構成
   # DifyのDocker Compose内のPostgreSQLとRedisを使用
   user_data = base64encode(templatefile("${path.module}/user_data.sh", {
-    s3_bucket  = aws_s3_bucket.dify.id
-    aws_region = var.aws_region
+    s3_bucket   = aws_s3_bucket.dify.id
+    aws_region  = var.aws_region
+    environment = var.environment
   }))
 
   metadata_options {
