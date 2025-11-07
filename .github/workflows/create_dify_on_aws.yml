@@ -1,6 +1,13 @@
 name: Dify環境自動構築 (AWS)
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/terraform/aws/**'
+      - 'infra/ansible/aws/**'
+      - '.github/workflows/create_dify_on_aws.yml'
   workflow_dispatch:
     inputs:
       environment_name:
@@ -19,6 +26,7 @@ jobs:
       TF_WORKING_DIR: ./infra/terraform/aws
       ANSIBLE_WORKING_DIR: ./infra/ansible/aws
       AWS_REGION: ${{ github.event.inputs.aws_region || 'ap-northeast-1' }}
+      ENVIRONMENT: ${{ github.event.inputs.environment_name || 'dev' }}
 
     steps:
       - name: Checkout repository
@@ -42,7 +50,7 @@ jobs:
       - name: Terraform Plan
         run: |
           terraform plan \
-            -var="environment=${{ github.event.inputs.environment_name }}" \
+            -var="environment=${{ env.ENVIRONMENT }}" \
             -var="aws_region=${{ env.AWS_REGION }}" \
             -out=tfplan
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -57,8 +65,16 @@ jobs:
         run: |
           EC2_PUBLIC_IP=$(terraform output -raw ec2_public_ip)
           SECURITY_GROUP_ID=$(terraform output -raw security_group_id)
+
+          if [ -z "$EC2_PUBLIC_IP" ] || [ -z "$SECURITY_GROUP_ID" ]; then
+            echo "Error: Failed to get Terraform outputs"
+            exit 1
+          fi
+
           echo "ec2_ip=${EC2_PUBLIC_IP}" >> $GITHUB_OUTPUT
           echo "sg_id=${SECURITY_GROUP_ID}" >> $GITHUB_OUTPUT
+          echo "EC2 IP: ${EC2_PUBLIC_IP}"
+          echo "Security Group ID: ${SECURITY_GROUP_ID}"
         working-directory: ${{ env.TF_WORKING_DIR }}
 
       - name: Get GitHub Actions Runner IP
@@ -68,6 +84,7 @@ jobs:
           echo "runner_ip=${IP}" >> $GITHUB_OUTPUT
 
       - name: Add GitHub Actions Runner IP to Security Group
+        if: steps.tf-outputs.outputs.sg_id != ''
         run: |
           aws ec2 authorize-security-group-ingress \
             --group-id ${{ steps.tf-outputs.outputs.sg_id }} \
@@ -77,12 +94,14 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Wait for EC2 Instance to be Ready
+        if: steps.tf-outputs.outputs.ec2_ip != ''
         run: |
           aws ec2 wait instance-status-ok \
             --filters "Name=ip-address,Values=${{ steps.tf-outputs.outputs.ec2_ip }}" \
             --region ${{ env.AWS_REGION }}
 
       - name: Setup Ansible
+        if: steps.tf-outputs.outputs.ec2_ip != ''
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible python3-pip
@@ -91,16 +110,18 @@ jobs:
           ansible-galaxy collection install amazon.aws
 
       - name: Retrieve SSH Key from AWS Secrets Manager
+        if: steps.tf-outputs.outputs.ec2_ip != ''
         id: get_ssh_key
         run: |
           aws secretsmanager get-secret-value \
-            --secret-id dify-ssh-private-key-${{ github.event.inputs.environment_name }} \
+            --secret-id dify-ssh-private-key-${{ env.ENVIRONMENT }} \
             --region ${{ env.AWS_REGION }} \
             --query SecretString \
             --output text > /tmp/ssh_key.pem
           chmod 600 /tmp/ssh_key.pem
 
       - name: Create Ansible Inventory
+        if: steps.tf-outputs.outputs.ec2_ip != ''
         run: |
           cat > hosts.ini << EOF
           [dify_servers]
@@ -112,6 +133,7 @@ jobs:
         working-directory: ${{ env.ANSIBLE_WORKING_DIR }}
 
       - name: Run Ansible Playbook
+        if: steps.tf-outputs.outputs.ec2_ip != ''
         run: |
           ansible-playbook -i hosts.ini playbook.yml \
             --ssh-common-args='-o StrictHostKeyChecking=no'
@@ -121,14 +143,14 @@ jobs:
         run: |
           echo "### Deployment Successful! :rocket:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** ${{ github.event.inputs.environment_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
           echo "**Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
           echo "**EC2 Public IP:** ${{ steps.tf-outputs.outputs.ec2_ip }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Access Dify at: http://${{ steps.tf-outputs.outputs.ec2_ip }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Remove GitHub Actions Runner IP from Security Group
-        if: always()
+        if: always() && steps.tf-outputs.outputs.sg_id != '' && steps.get_ip.outputs.runner_ip != ''
         run: |
           aws ec2 revoke-security-group-ingress \
             --group-id ${{ steps.tf-outputs.outputs.sg_id }} \
@@ -141,3 +163,32 @@ jobs:
         if: always()
         run: |
           rm -f /tmp/ssh_key.pem
+
+      - name: Cleanup on Failure
+        if: failure() && steps.tf-apply.conclusion == 'success'
+        run: |
+          echo "⚠️ デプロイが失敗しました。リソースのクリーンアップを開始します..."
+          
+          # Terraform destroy を実行
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform destroy \
+            -var="environment=${{ env.ENVIRONMENT }}" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -auto-approve || echo "Terraform destroy に失敗しました"
+          
+          # Secrets Manager のクリーンアップ
+          echo "Secrets Manager をクリーンアップ中..."
+          aws secretsmanager delete-secret \
+            --secret-id dify-ssh-private-key-${{ env.ENVIRONMENT }} \
+            --region ${{ env.AWS_REGION }} \
+            --force-delete-without-recovery 2>/dev/null || true
+          
+          aws secretsmanager delete-secret \
+            --secret-id dify-ssh-public-key-${{ env.ENVIRONMENT }} \
+            --region ${{ env.AWS_REGION }} \
+            --force-delete-without-recovery 2>/dev/null || true
+          
+          echo "✅ クリーンアップが完了しました"
+          echo ""
+          echo "手動でのクリーンアップが必要な場合は、以下のワークフローを実行してください:"
+          echo "https://github.com/${{ github.repository }}/actions/workflows/cleanup-aws-resources.yml"
