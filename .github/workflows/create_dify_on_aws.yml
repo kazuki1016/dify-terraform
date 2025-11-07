@@ -5,9 +5,9 @@ on:
     branches:
       - main
     paths:
-      - 'infra/terraform/aws/**'
-      - 'infra/ansible/aws/**'
-      - '.github/workflows/create_dify_on_aws.yml'
+      - "infra/terraform/aws/**"
+      - "infra/ansible/aws/**"
+      - ".github/workflows/create_dify_on_aws.yml"
   workflow_dispatch:
     inputs:
       environment_name:
@@ -42,6 +42,7 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.13.4
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: terraform init
@@ -168,26 +169,26 @@ jobs:
         if: failure() && steps.tf-apply.conclusion == 'success'
         run: |
           echo "⚠️ デプロイが失敗しました。リソースのクリーンアップを開始します..."
-          
+
           # Terraform destroy を実行
           cd ${{ env.TF_WORKING_DIR }}
           terraform destroy \
             -var="environment=${{ env.ENVIRONMENT }}" \
             -var="aws_region=${{ env.AWS_REGION }}" \
             -auto-approve || echo "Terraform destroy に失敗しました"
-          
+
           # Secrets Manager のクリーンアップ
           echo "Secrets Manager をクリーンアップ中..."
           aws secretsmanager delete-secret \
             --secret-id dify-ssh-private-key-${{ env.ENVIRONMENT }} \
             --region ${{ env.AWS_REGION }} \
             --force-delete-without-recovery 2>/dev/null || true
-          
+
           aws secretsmanager delete-secret \
             --secret-id dify-ssh-public-key-${{ env.ENVIRONMENT }} \
             --region ${{ env.AWS_REGION }} \
             --force-delete-without-recovery 2>/dev/null || true
-          
+
           echo "✅ クリーンアップが完了しました"
           echo ""
           echo "手動でのクリーンアップが必要な場合は、以下のワークフローを実行してください:"
