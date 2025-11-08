@@ -15,6 +15,20 @@ resource "aws_security_group" "ec2" {
 }
 
 # EC2 Security Group Rules - Ingress
+resource "aws_vpc_security_group_ingress_rule" "ec2_ssh" {
+  security_group_id = aws_security_group.ec2.id
+  description       = "Allow SSH from allowed IPs"
+
+  cidr_ipv4   = var.allowed_ip_addresses[0]
+  from_port   = 22
+  to_port     = 22
+  ip_protocol = "tcp"
+
+  tags = {
+    Name = "allow-ssh"
+  }
+}
+
 resource "aws_vpc_security_group_ingress_rule" "ec2_http" {
   security_group_id = aws_security_group.ec2.id
   description       = "Allow HTTP from allowed IPs"
